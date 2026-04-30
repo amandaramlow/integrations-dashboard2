@@ -88,6 +88,10 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);fon
 .fsel:focus{border-color:var(--brand)}
 .btn-exp{display:flex;align-items:center;gap:4px;background:var(--brand);border:none;border-radius:var(--r2);padding:5px 11px;font-size:12px;font-weight:600;font-family:inherit;color:#fff;cursor:pointer;transition:.15s}
 .btn-exp:hover{background:#1c4ecc}
+.btn-csv{display:flex;align-items:center;gap:4px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r2);padding:5px 11px;font-size:12px;font-weight:600;font-family:inherit;color:var(--text2);cursor:pointer;transition:.15s}
+.btn-csv:hover{border-color:var(--brand);color:var(--brand)}
+.csv-toast{position:fixed;bottom:20px;right:20px;background:#1a1a2e;color:#fff;padding:10px 16px;border-radius:8px;font-size:12.5px;font-weight:500;z-index:9999;opacity:0;transition:opacity .3s;pointer-events:none}
+.csv-toast.show{opacity:1}
 
 .tbl-wrap{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:12px}
@@ -227,6 +231,11 @@ td.comment-td{max-width:200px;font-size:11px;color:var(--muted);font-style:itali
           <option value="30">30+ days</option>
           <option value="14">14+ days</option>
         </select>
+        <label class="btn-csv" title="Export your Google Sheet as CSV (File → Download → CSV), then load it here">
+          <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Load CSV
+          <input type="file" accept=".csv" style="display:none" onchange="loadCSV(event)">
+        </label>
         <button class="btn-exp" onclick="exportCSV()">
           <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Export
@@ -496,7 +505,141 @@ function exportCSV(){
   a.click();
 }
 
+// ── CSV LOADER ────────────────────────────────────────────────────────────────
+function loadCSV(evt) {
+  const file = evt.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const rows = parseCSV(e.target.result);
+      if (rows.length < 2) { showToast('⚠ CSV appears empty'); return; }
+      const headers = rows[0].map(h => h.trim().toLowerCase());
+
+      // Column index helpers — tolerant matching
+      const col = (names) => { for (const n of names) { const i = headers.findIndex(h => h.includes(n)); if (i >= 1 || i === 0) return i; } return -1; };
+      const idx = {
+        n:   col(['case number','case #','case no']),
+        a:   col(['account name','account']),
+        p:   col(['product','integration product']),
+        s:   col(['status','case status']),
+        o:   col(['owner','case owner','assigned']),
+        lu:  col(['latest update','last update','last comment','update']),
+        lmd: col(['last modified date','modified date','last mod date']),
+        lmb: col(['last modified by','modified by']),
+        ss:  col(['sub-status','sub status','substatus']),
+        id:  col(['install date','installation date']),
+        ip:  col(['install priority','priority']),
+        ag:  col(['age','age (days)','days open','case age']),
+        dso: col(['days since outreach','days since last outreach','dso']),
+      };
+
+      const today = new Date();
+      today.setHours(0,0,0,0);
+      const parseDate = s => { if (!s) return null; const d = new Date(s); return isNaN(d) ? null : d; };
+      const daysDiff = d => { if (!d) return null; const diff = Math.round((today - d) / 86400000); return diff; };
+
+      RAW = rows.slice(1).filter(r => r.some(c => c.trim())).map(r => {
+        const g = i => (i >= 0 && i < r.length) ? r[i].trim() : '';
+        const caseNum = g(idx.n);
+        if (!caseNum) return null;
+
+        const installDateStr = g(idx.id);
+        const installDate = parseDate(installDateStr);
+        const installDaysLeft = installDate ? Math.round((installDate - today) / 86400000) : null;
+        const installOverdue = installDate && installDate < today;
+        const installSoon = installDate && installDaysLeft >= 0 && installDaysLeft <= 14;
+        const installPretty = installDate ? installDate.toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
+
+        const lastUpdateRaw = g(idx.lu);
+        const lastUpdateDate = parseDate(g(idx.lmd)) || parseDate(lastUpdateRaw);
+        const dso = idx.dso >= 0 ? (parseInt(g(idx.dso)) || null) : daysDiff(lastUpdateDate);
+
+        const hasNoOutreach = !lastUpdateRaw;
+        const gvpStale = dso != null && dso > 7;
+        const lapsed = dso != null && dso > 14;
+
+        const flags = [];
+        if (installOverdue) flags.push('install_overdue');
+        if (installSoon) flags.push('install_soon');
+
+        const rawAge = g(idx.ag);
+        const age = parseInt(rawAge) || (daysDiff(parseDate(g(idx.lmd))) ?? 0);
+
+        return {
+          n: caseNum,
+          a: g(idx.a),
+          p: g(idx.p),
+          s: g(idx.s) || 'Open',
+          o: g(idx.o),
+          lu: lastUpdateRaw,
+          lmd: g(idx.lmd),
+          lmb: g(idx.lmb),
+          ss: g(idx.ss),
+          id: installDateStr,
+          ip: installPretty,
+          ag: age,
+          dso: dso,
+          fl: flags,
+          no: hasNoOutreach,
+          gs: gvpStale,
+          ul: lapsed,
+          dsm: dso,
+        };
+      }).filter(Boolean);
+
+      // Reset UI
+      ['owner-filter','status-filter'].forEach(id => {
+        const sel = document.getElementById(id);
+        while (sel.options.length > 1) sel.remove(1);
+      });
+
+      // Update date badge
+      const badge = document.querySelector('.t-date');
+      if (badge) badge.textContent = 'As of ' + new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
+
+      init();
+      showToast(`✓ Loaded ${RAW.length} cases from ${file.name}`);
+    } catch(err) {
+      showToast('⚠ Could not parse CSV: ' + err.message);
+    }
+    evt.target.value = ''; // reset file input so same file can be re-loaded
+  };
+  reader.readAsText(file);
+}
+
+function parseCSV(text) {
+  const rows = [];
+  let row = [], cell = '', inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i], next = text[i+1];
+    if (inQ) {
+      if (ch === '"' && next === '"') { cell += '"'; i++; }
+      else if (ch === '"') { inQ = false; }
+      else { cell += ch; }
+    } else {
+      if (ch === '"') { inQ = true; }
+      else if (ch === ',') { row.push(cell); cell = ''; }
+      else if (ch === '\n' || (ch === '\r' && next === '\n')) {
+        row.push(cell); rows.push(row); row = []; cell = '';
+        if (ch === '\r') i++;
+      } else if (ch === '\r') { row.push(cell); rows.push(row); row = []; cell = ''; }
+      else { cell += ch; }
+    }
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+function showToast(msg) {
+  const t = document.getElementById('csv-toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3500);
+}
+
 init();
 </script>
+<div id="csv-toast" class="csv-toast"></div>
 </body>
 </html>
